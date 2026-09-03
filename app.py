@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -10,7 +11,9 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+from ai_reasoning import generate_reasoning_stream
 from audit_logger import clear_audit_trail, get_audit_trail, log_action
+from customer_intel import build_customer_intelligence
 from data_generator import OUTPUT_FILE, generate_failed_transactions
 from hinglish_bot import generate_hinglish_message, simulate_customer_reply
 from razorpay_service import create_payment_link
@@ -159,7 +162,6 @@ def process_full_batch(df: pd.DataFrame) -> tuple[pd.DataFrame, list[dict[str, s
     chats: list[dict[str, str]] = []
     progress = st.progress(0, text="Starting recovery agent...")
     terminal_container = st.empty()
-    terminal_text = "### 🧠 AI Agent Live Thoughts...\n"
     total = len(processed)
 
     for index, (row_label, row) in enumerate(processed.iterrows(), start=1):
@@ -174,11 +176,30 @@ def process_full_batch(df: pd.DataFrame) -> tuple[pd.DataFrame, list[dict[str, s
             f"{txn.get('error_code')} -> {action}; {strategy.get('description')}",
         )
 
-        # Update the live hacker terminal
-        terminal_text += f"**[{txn_id}]** Error: `{txn.get('error_code')}` ⚡ Action: `{action}`\n"
-        # Only keep last 5 lines so it looks like a scrolling terminal
-        display_text = "\n".join(terminal_text.split("\n")[-6:])
-        terminal_container.info(display_text)
+        # 🧠 FEATURE 1: Live AI reasoning stream
+        reasoning_lines = generate_reasoning_stream(txn, strategy)
+        reasoning_display = f"### 🧠 AI Agent Reasoning — `{txn_id}`\n\n"
+        for line in reasoning_lines:
+            reasoning_display += f"{line}\n\n"
+            terminal_container.markdown(
+                f"""
+                <div style="
+                    background:#0d1420;
+                    border-left:3px solid #ffb84d;
+                    padding:1rem 1.1rem;
+                    border-radius:10px;
+                    font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+                    color:#b7d0ea;
+                    font-size:0.92rem;
+                    line-height:1.55;
+                    min-height:180px;
+                ">
+                {reasoning_display.replace(chr(10), '<br>')}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            time.sleep(0.08)
 
         recovered = False
         recovered_amount = 0.0
@@ -223,10 +244,15 @@ def process_full_batch(df: pd.DataFrame) -> tuple[pd.DataFrame, list[dict[str, s
                 "SUCCESS" if recovered else "INFO",
             )
 
-        processed.at[row_label, "retry_count"] = int(txn.get("retry_count") or 0) + (1 if strategy.get("is_recoverable") else 0)
+        processed.at[row_label, "retry_count"] = int(txn.get("retry_count") or 0) + (
+            1 if strategy.get("is_recoverable") else 0
+        )
         if action == "SEND_HINGLISH_NUDGE":
             processed.at[row_label, "last_contact_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        processed.at[row_label, "recovery_status"] = "RECOVERED" if recovered else status_for_failed_attempt(strategy)
+
+        processed.at[row_label, "recovery_status"] = (
+            "RECOVERED" if recovered else status_for_failed_attempt(strategy)
+        )
         processed.at[row_label, "recovered_amount"] = recovered_amount
         processed.at[row_label, "recovery_action"] = action
         processed.at[row_label, "recovery_reason"] = strategy.get("block_reason") or strategy.get("description")
@@ -235,9 +261,7 @@ def process_full_batch(df: pd.DataFrame) -> tuple[pd.DataFrame, list[dict[str, s
         progress.progress(index / total, text=f"Processed {index}/{total} transactions")
 
     progress.empty()
-    save_transactions(processed)
-    progress.empty()
-    terminal_container.empty()  # clears the live terminal when done
+    terminal_container.empty()
     save_transactions(processed)
     return processed, chats
 
@@ -289,41 +313,47 @@ def render_charts(df: pd.DataFrame) -> None:
 
 
 def render_roi_projection(df: pd.DataFrame) -> None:
-    """Renders the ROI impact calculator for Razorpay scale."""
     st.markdown("<h3>📈 Projected Impact at Razorpay Scale</h3>", unsafe_allow_html=True)
     st.caption("What if this agent ran across Razorpay's full transaction volume?")
-    
+
     total_failed = float(df["amount"].sum()) if not df.empty else 0.0
     total_recovered = float(df["recovered_amount"].sum()) if not df.empty and "recovered_amount" in df else 0.0
     recovery_rate = (total_recovered / total_failed) if total_failed > 0 else 0.0
     avg_txn_value = float(df["amount"].mean()) if not df.empty else 0.0
 
     c1, c2, c3 = st.columns(3)
-    
+
     with c1:
         daily_failed_txns_at_scale = st.number_input(
-            "Estimated Failed txns/day:", 
-            value=100000, 
+            "Estimated Failed txns/day:",
+            value=100000,
             step=10000,
-            help="Simulate Razorpay's daily failed transaction volume"
+            help="Simulate Razorpay's daily failed transaction volume",
         )
-        
+
     projected_daily_recovery = daily_failed_txns_at_scale * recovery_rate * avg_txn_value
     projected_annual_recovery = projected_daily_recovery * 365
-    
+
     with c2:
         st.metric("Avg Transaction Value", money(avg_txn_value))
         st.metric("Current Agent Recovery Rate", f"{recovery_rate * 100:.1f}%")
-        
+
     with c3:
         st.metric("Projected Daily Recovery", money(projected_daily_recovery))
-        st.metric("💰 Projected Annual Recovery", money(projected_annual_recovery), delta="Generated by this AI agent")
-        
+        st.metric(
+            "💰 Projected Annual Recovery",
+            money(projected_annual_recovery),
+            delta="Generated by this AI agent",
+        )
+
     if projected_annual_recovery > 10000000:
-        st.success(f"🚀 At scale, this AI agent could recover **₹{projected_annual_recovery/10000000:.1f} Crores annually** for Razorpay's merchant ecosystem!")
+        st.success(
+            f"🚀 At scale, this AI agent could recover **₹{projected_annual_recovery/10000000:.1f} Crores annually** for Razorpay's merchant ecosystem!"
+        )
 
 
 def render_transactions_tab(df: pd.DataFrame) -> None:
+    """FIXED: this function was missing and caused your error."""
     columns = [
         "txn_id",
         "customer_name",
@@ -340,6 +370,84 @@ def render_transactions_tab(df: pd.DataFrame) -> None:
     st.dataframe(df[visible], use_container_width=True, hide_index=True)
 
 
+def render_customer_intelligence(df: pd.DataFrame) -> None:
+    st.markdown("### 🧬 Customer Intelligence Profile")
+    st.caption("Select any transaction to view behavioral score, risk, propensity and next-best-action.")
+
+    if df.empty:
+        st.info("No transactions available.")
+        return
+
+    txn_ids = df["txn_id"].astype(str).tolist()
+    selected_txn = st.selectbox("Select transaction", txn_ids, index=0)
+    row = df[df["txn_id"].astype(str) == selected_txn].iloc[0].to_dict()
+    intel = build_customer_intelligence(row)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Risk Score", f"{intel['risk_score']}/100")
+    c2.metric("Recovery Propensity", f"{intel['recovery_propensity']}%")
+    c3.metric("Value Tier", intel["value_tier"])
+    c4.metric("Est. LTV", money(float(intel["estimated_ltv"])))
+
+    left, right = st.columns(2)
+
+    with left:
+        st.markdown(
+            f"""
+            <div class='info-box'>
+                <b>{intel['customer_name']}</b> · {intel['txn_id']}<br>
+                Merchant: <b>{intel['merchant']}</b><br>
+                Amount: <b>₹{intel['amount']:,.2f}</b><br>
+                Failure: <b>{intel['error_code']}</b><br><br>
+                <b>Best Channel:</b> {intel['best_channel']}<br>
+                <b>Preferred Window:</b> {intel['preferred_window']}<br>
+                <b>Sentiment:</b> {intel['sentiment']}<br>
+                <b>Past Recoveries:</b> {intel['prior_success']} success / {intel['prior_fail']} fail
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with right:
+        st.markdown(
+            f"""
+            <div class='info-box'>
+                <b>🎯 Next Best Action</b><br>
+                {intel['best_action']}<br><br>
+                <b>🧠 Agent Recommendation</b><br>
+                {intel['recommendation']}<br><br>
+                <b>Trust Signals</b><br>
+                {"<br>".join(f"• {signal}" for signal in intel["trust_signals"])}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    gauge_df = pd.DataFrame(
+        {
+            "Metric": ["Risk Score", "Recovery Propensity"],
+            "Value": [intel["risk_score"], intel["recovery_propensity"]],
+        }
+    )
+    fig = px.bar(
+        gauge_df,
+        x="Metric",
+        y="Value",
+        color="Metric",
+        color_discrete_sequence=["#e85d75", "#ffb84d"],
+        range_y=[0, 100],
+        title="Risk vs Recovery Propensity",
+    )
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="#0e1117",
+        plot_bgcolor="#151922",
+        height=300,
+        showlegend=False,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
 def render_chats_tab() -> None:
     chats = st.session_state.get("chats", [])
     if not chats:
@@ -348,8 +456,14 @@ def render_chats_tab() -> None:
 
     for chat in chats:
         with st.expander(f"{chat['txn_id']} - {chat['customer']} at {chat['merchant']}", expanded=False):
-            st.markdown(f"<div class='chat-bubble-bot'><b>RevRescue Bot</b><br>{chat['bot_message']}</div>", unsafe_allow_html=True)
-            st.markdown(f"<div class='chat-bubble-user'><b>Customer</b><br>{chat['customer_reply']}</div>", unsafe_allow_html=True)
+            st.markdown(
+                f"<div class='chat-bubble-bot'><b>RevRescue Bot</b><br>{chat['bot_message']}</div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f"<div class='chat-bubble-user'><b>Customer</b><br>{chat['customer_reply']}</div>",
+                unsafe_allow_html=True,
+            )
 
 
 def render_audit_tab() -> None:
@@ -370,7 +484,9 @@ def render_exception_tab(df: pd.DataFrame) -> None:
         st.success("No unrecoverable transactions in this run.")
         return
 
-    st.warning(f"{len(exceptions)} transactions could not be recovered. These are shown honestly for judging transparency.")
+    st.warning(
+        f"{len(exceptions)} transactions could not be recovered. These are shown honestly for judging transparency."
+    )
     for _, row in exceptions.iterrows():
         reason = row.get("recovery_reason", "No automated recovery path available.")
         st.markdown(
@@ -406,9 +522,18 @@ def main() -> None:
                 st.warning("Generate a batch before running the recovery agent.")
             else:
                 clear_audit_trail()
-                log_action("BATCH", "RUN_STARTED", f"Processing full batch of {len(st.session_state.transactions)} transactions.")
+                log_action(
+                    "BATCH",
+                    "RUN_STARTED",
+                    f"Processing full batch of {len(st.session_state.transactions)} transactions.",
+                )
                 updated_df, chats = process_full_batch(st.session_state.transactions)
-                log_action("BATCH", "RUN_COMPLETED", f"Processed all {len(updated_df)} transactions with no cherry-picking.", "SUCCESS")
+                log_action(
+                    "BATCH",
+                    "RUN_COMPLETED",
+                    f"Processed all {len(updated_df)} transactions with no cherry-picking.",
+                    "SUCCESS",
+                )
                 st.session_state.transactions = updated_df
                 st.session_state.chats = chats
                 st.session_state.agent_has_run = True
@@ -444,19 +569,19 @@ def main() -> None:
 
     render_metrics(df)
     st.divider()
-    
     render_charts(df)
     st.divider()
-    
     render_roi_projection(df)
     st.divider()
 
-    tab_transactions, tab_chats, tab_audit, tab_exceptions = st.tabs(
-        ["Transactions", "Hinglish Chats", "Audit Trail", "Exception List"]
+    tab_transactions, tab_intel, tab_chats, tab_audit, tab_exceptions = st.tabs(
+        ["Transactions", "Customer Intel", "Hinglish Chats", "Audit Trail", "Exception List"]
     )
 
     with tab_transactions:
         render_transactions_tab(df)
+    with tab_intel:
+        render_customer_intelligence(df)
     with tab_chats:
         render_chats_tab()
     with tab_audit:
@@ -464,7 +589,7 @@ def main() -> None:
     with tab_exceptions:
         render_exception_tab(df)
 
-    st.markdown(
+        st.markdown(
         "<div class='footer'>Built for Razorpay Hackathon Track 03: AI Revenue Recovery</div>",
         unsafe_allow_html=True,
     )
