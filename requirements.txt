@@ -1,0 +1,7 @@
+streamlit==1.37.1
+pandas==2.2.2
+groq==0.11.0
+razorpay==1.4.2
+python-dotenv==1.0.1
+faker==26.0.0
+plotly==5.23.0

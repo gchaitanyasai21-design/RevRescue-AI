@@ -1,0 +1,26 @@
+# Environment & secrets
+.env
+env/
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Data & logs (regenerated at runtime)
+data/audit_trail.log
+data/*.log
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Audio / temp
+*.mp3
+*.wav
