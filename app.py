@@ -18,6 +18,7 @@ from data_generator import OUTPUT_FILE, generate_failed_transactions
 from hinglish_bot import generate_hinglish_message, simulate_customer_reply
 from razorpay_service import create_payment_link
 from recovery_agent import COOLING_OFF_HOURS, MAX_RETRIES, diagnose_and_strategize, simulate_recovery
+from whatif_simulator import WhatIfInputs, simulate_whatif
 
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
@@ -353,7 +354,6 @@ def render_roi_projection(df: pd.DataFrame) -> None:
 
 
 def render_transactions_tab(df: pd.DataFrame) -> None:
-    """FIXED: this function was missing and caused your error."""
     columns = [
         "txn_id",
         "customer_name",
@@ -446,6 +446,128 @@ def render_customer_intelligence(df: pd.DataFrame) -> None:
         showlegend=False,
     )
     st.plotly_chart(fig, use_container_width=True)
+
+
+def render_whatif_simulator(df: pd.DataFrame) -> None:
+    """FEATURE 3: Interactive What-If Strategy Simulator."""
+    st.markdown("### 🧪 What-If Strategy Simulator")
+    st.caption("Tune recovery levers and instantly see projected upside on this batch.")
+
+    if df.empty:
+        st.info("Generate a batch to use the simulator.")
+        return
+
+    left, right = st.columns([1.1, 1.2])
+
+    with left:
+        st.markdown("#### Strategy Levers")
+        max_retries = st.slider("Max retries", min_value=1, max_value=5, value=3, step=1)
+        discount_pct = st.slider("Discount incentive (%)", min_value=0, max_value=15, value=5, step=1)
+        contact_hour = st.slider("Contact hour (24h format)", min_value=0, max_value=23, value=19, step=1)
+        cooling_off_hours = st.slider("Cooling-off (hours)", min_value=0.5, max_value=6.0, value=2.0, step=0.5)
+        emi_push_strength = st.select_slider(
+            "EMI push strength (Insufficient Funds)",
+            options=[0, 1, 2],
+            value=1,
+            format_func=lambda x: {0: "Quiet", 1: "Balanced", 2: "Aggressive"}[x],
+        )
+        alt_route_priority = st.select_slider(
+            "Alternate route priority (Bank/Network failures)",
+            options=[0, 1],
+            value=1,
+            format_func=lambda x: {0: "Off", 1: "On"}[x],
+        )
+
+        inputs = WhatIfInputs(
+            max_retries=max_retries,
+            discount_pct=discount_pct,
+            contact_hour=contact_hour,
+            emi_push_strength=int(emi_push_strength),
+            alt_route_priority=int(alt_route_priority),
+            cooling_off_hours=float(cooling_off_hours),
+        )
+
+    result = simulate_whatif(df, inputs)
+
+    with right:
+        st.markdown("#### Projected Outcome")
+        c1, c2, c3 = st.columns(3)
+        c1.metric(
+            "Expected Recovery Rate",
+            f"{result['expected_rate']*100:.1f}%",
+            delta=f"{result['delta_rate_pp']:+.1f} pp vs baseline",
+        )
+        c2.metric(
+            "Expected Recovered",
+            money(result["expected_recovered"]),
+            delta=f"{result['delta_recovered']:+,.0f} vs baseline",
+        )
+        c3.metric("Blocked (Compliance)", f"{result['blocked_txns']} txns")
+
+        daily_vol = st.number_input(
+            "Scale: failed txns/day",
+            min_value=1000,
+            max_value=500000,
+            value=100000,
+            step=5000,
+            key="whatif_daily_vol",
+        )
+        avg_txn = float(df["amount"].mean()) if len(df) else 0.0
+        annual = daily_vol * result["expected_rate"] * avg_txn * 365
+        baseline_annual = daily_vol * result["baseline_rate"] * avg_txn * 365
+        upside = annual - baseline_annual
+
+        st.metric(
+            "Projected Annual Recovery (scaled)",
+            money(annual),
+            delta=f"{upside:+,.0f} vs baseline policy",
+        )
+
+        if upside > 0:
+            st.success(
+                f"🚀 This policy tuning unlocks about **₹{upside/1e7:.2f} Cr/year** extra upside at selected scale."
+            )
+        elif upside < 0:
+            st.warning("This tuning reduces expected recovery. Useful to show judges bad policies can hurt revenue.")
+        else:
+            st.info("No material change vs baseline policy.")
+
+    by_error = result["by_error"]
+    if not by_error.empty:
+        chart_df = by_error.melt(
+            id_vars=["error_code"],
+            value_vars=["baseline_expected", "whatif_expected"],
+            var_name="Scenario",
+            value_name="Expected Amount",
+        )
+        chart_df["Scenario"] = chart_df["Scenario"].map(
+            {
+                "baseline_expected": "Baseline Policy",
+                "whatif_expected": "What-If Policy",
+            }
+        )
+
+        fig = px.bar(
+            chart_df,
+            x="error_code",
+            y="Expected Amount",
+            color="Scenario",
+            barmode="group",
+            title="Expected Recovery by Failure Reason (Baseline vs What-If)",
+            color_discrete_sequence=["#64748b", "#ffb84d"],
+        )
+        fig.update_layout(
+            template="plotly_dark",
+            paper_bgcolor="#0e1117",
+            plot_bgcolor="#151922",
+            height=360,
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.caption(
+            "Model notes: USER_CANCELLED / FRAUD_SUSPECTED / INVALID_CARD stay blocked (compliance-first). "
+            "This is expected-value simulation on the current batch, not cherry-picked outcomes."
+        )
 
 
 def render_chats_tab() -> None:
@@ -574,14 +696,16 @@ def main() -> None:
     render_roi_projection(df)
     st.divider()
 
-    tab_transactions, tab_intel, tab_chats, tab_audit, tab_exceptions = st.tabs(
-        ["Transactions", "Customer Intel", "Hinglish Chats", "Audit Trail", "Exception List"]
+    tab_transactions, tab_intel, tab_whatif, tab_chats, tab_audit, tab_exceptions = st.tabs(
+        ["Transactions", "Customer Intel", "What-If Lab", "Hinglish Chats", "Audit Trail", "Exception List"]
     )
 
     with tab_transactions:
         render_transactions_tab(df)
     with tab_intel:
         render_customer_intelligence(df)
+    with tab_whatif:
+        render_whatif_simulator(df)
     with tab_chats:
         render_chats_tab()
     with tab_audit:
@@ -589,7 +713,7 @@ def main() -> None:
     with tab_exceptions:
         render_exception_tab(df)
 
-        st.markdown(
+    st.markdown(
         "<div class='footer'>Built for Razorpay Hackathon Track 03: AI Revenue Recovery</div>",
         unsafe_allow_html=True,
     )
