@@ -16,6 +16,13 @@ from audit_logger import clear_audit_trail, get_audit_trail, log_action
 from customer_intel import build_customer_intelligence
 from data_generator import OUTPUT_FILE, generate_failed_transactions
 from hinglish_bot import generate_hinglish_message, simulate_customer_reply
+from merchant_intel import (
+    compute_merchant_stats,
+    filter_by_merchant,
+    get_all_merchants,
+    get_merchant_profile,
+    rank_merchants,
+)
 from razorpay_service import create_payment_link
 from recovery_agent import COOLING_OFF_HOURS, MAX_RETRIES, diagnose_and_strategize, simulate_recovery
 from whatif_simulator import WhatIfInputs, simulate_whatif
@@ -370,6 +377,67 @@ def render_transactions_tab(df: pd.DataFrame) -> None:
     st.dataframe(df[visible], use_container_width=True, hide_index=True)
 
 
+def render_merchant_leaderboard(df_full: pd.DataFrame) -> None:
+    """FEATURE B: Merchant performance leaderboard across all merchants."""
+    st.markdown("### 🏆 Merchant Recovery Leaderboard")
+    st.caption("Compare recovery performance across all merchants in this batch.")
+
+    if df_full.empty:
+        st.info("No transactions available.")
+        return
+
+    ranking = rank_merchants(df_full)
+    if ranking.empty:
+        st.info("No merchant data to rank yet.")
+        return
+
+    # Top-line metrics
+    total_merchants = len(ranking)
+    best_merchant = ranking.iloc[0]["Merchant"]
+    best_rate = ranking.iloc[0]["Recovery Rate %"]
+    worst_merchant = ranking.iloc[-1]["Merchant"]
+    worst_rate = ranking.iloc[-1]["Recovery Rate %"]
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Merchants in Batch", f"{total_merchants}")
+    c2.metric(f"🥇 Best: {best_merchant}", f"{best_rate}%")
+    c3.metric(f"⚠️ Needs Attention: {worst_merchant}", f"{worst_rate}%")
+
+    st.divider()
+
+    # Formatted ranking table
+    display_df = ranking.copy()
+    display_df["Failed Amount"] = display_df["Failed Amount"].apply(lambda x: f"₹{x:,.0f}")
+    display_df["Recovered"] = display_df["Recovered"].apply(lambda x: f"₹{x:,.0f}")
+    display_df["Recovery Rate %"] = display_df["Recovery Rate %"].apply(lambda x: f"{x}%")
+
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+    # Comparison chart
+    fig = px.bar(
+        ranking,
+        x="Merchant",
+        y="Recovery Rate %",
+        color="Recovery Rate %",
+        color_continuous_scale=["#e85d75", "#ffb84d", "#4ade80"],
+        title="Recovery Rate by Merchant (%)",
+        text="Recovery Rate %",
+    )
+    fig.update_traces(texttemplate="%{text}%", textposition="outside")
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="#0e1117",
+        plot_bgcolor="#151922",
+        height=400,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.caption(
+        "💡 Merchants with lower recovery rates may need custom Hinglish tone tuning, "
+        "different discount strategies, or channel adjustments — all configurable in the What-If Lab."
+    )
+
+
 def render_customer_intelligence(df: pd.DataFrame) -> None:
     st.markdown("### 🧬 Customer Intelligence Profile")
     st.caption("Select any transaction to view behavioral score, risk, propensity and next-best-action.")
@@ -684,10 +752,80 @@ def main() -> None:
         unsafe_allow_html=True,
     )
 
-    df = st.session_state.transactions
-    if df.empty:
+    df_full = st.session_state.transactions
+    if df_full.empty:
         st.info("Generate a synthetic failed-payment batch from the sidebar to start the demo.")
         st.stop()
+
+    # 🏪 FEATURE B: Multi-Merchant Selector
+    merchants_list = ["All Merchants"] + get_all_merchants(df_full)
+    selector_col, profile_col = st.columns([1, 2])
+
+    with selector_col:
+        selected_merchant = st.selectbox(
+            "🏪 Viewing merchant:",
+            merchants_list,
+            index=0,
+            help="Filter the entire dashboard by merchant. Switch to see per-merchant recovery patterns.",
+        )
+
+    # Filter dataframe based on selection
+    df = filter_by_merchant(df_full, selected_merchant)
+
+    # Show merchant profile card if a specific merchant is selected
+    if selected_merchant != "All Merchants":
+        profile = get_merchant_profile(selected_merchant)
+        stats = compute_merchant_stats(df_full, selected_merchant)
+
+        with profile_col:
+            st.markdown(
+                f"""
+                <div style="
+                    background: linear-gradient(135deg, {profile['brand_color']}22, #171b24);
+                    border: 1px solid {profile['brand_color']}66;
+                    border-radius: 10px;
+                    padding: 1rem 1.2rem;
+                    color: #f7f3ea;
+                ">
+                    <div style="font-size:1.6rem; margin-bottom:0.3rem;">
+                        {profile['logo_emoji']} <b>{selected_merchant}</b>
+                        <span style="color:#c6cad3; font-size:0.9rem; font-weight:400;"> · {profile['category']}</span>
+                    </div>
+                    <div style="font-size:0.9rem; color:#c6cad3;">
+                        <b>Avg Ticket:</b> {profile['avg_ticket_size']} &nbsp;|&nbsp;
+                        <b>Peak Hours:</b> {profile['peak_hours']}<br>
+                        <b>Primary Channel:</b> {profile['primary_channel']} &nbsp;|&nbsp;
+                        <b>Recovery Tone:</b> {profile['tone']}<br>
+                        <b>Top Failure Type:</b> <span style="color:#ffb84d;">{profile['top_failure_type']}</span>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+    else:
+        with profile_col:
+            st.markdown(
+                f"""
+                <div style="
+                    background: linear-gradient(135deg, #ffb84d22, #171b24);
+                    border: 1px solid #ffb84d55;
+                    border-radius: 10px;
+                    padding: 1rem 1.2rem;
+                    color: #f7f3ea;
+                ">
+                    <div style="font-size:1.4rem;">
+                        🌐 <b>All Merchants View</b>
+                    </div>
+                    <div style="font-size:0.9rem; color:#c6cad3;">
+                        Aggregate view across <b>{len(get_all_merchants(df_full))} merchants</b> and
+                        <b>{len(df_full)} transactions</b>. Select a specific merchant above to drill down.
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    st.divider()
 
     render_metrics(df)
     st.divider()
@@ -696,12 +834,30 @@ def main() -> None:
     render_roi_projection(df)
     st.divider()
 
-    tab_transactions, tab_intel, tab_whatif, tab_chats, tab_audit, tab_exceptions = st.tabs(
-        ["Transactions", "Customer Intel", "What-If Lab", "Hinglish Chats", "Audit Trail", "Exception List"]
+    (
+        tab_transactions,
+        tab_merchants,
+        tab_intel,
+        tab_whatif,
+        tab_chats,
+        tab_audit,
+        tab_exceptions,
+    ) = st.tabs(
+        [
+            "Transactions",
+            "Merchant Leaderboard",
+            "Customer Intel",
+            "What-If Lab",
+            "Hinglish Chats",
+            "Audit Trail",
+            "Exception List",
+        ]
     )
 
     with tab_transactions:
         render_transactions_tab(df)
+    with tab_merchants:
+        render_merchant_leaderboard(df_full)
     with tab_intel:
         render_customer_intelligence(df)
     with tab_whatif:
